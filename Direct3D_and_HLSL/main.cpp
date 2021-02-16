@@ -89,10 +89,6 @@ int main() {
 	IDXGIFactory6* dxgiFactory = nullptr;
 	IDXGIAdapter* adpt = nullptr;
 	D3D_FEATURE_LEVEL featureLevel;
-	ID3D12CommandAllocator* cmdAllocator = nullptr;
-	ID3D12GraphicsCommandList* cmdList = nullptr;
-	ID3D12CommandQueue* cmdQueue = nullptr;
-	IDXGISwapChain4* swapchain = nullptr;
 
 	HRESULT result = S_OK;
 	if (FAILED(CreateDXGIFactory2(DXGI_CREATE_FACTORY_DEBUG, IID_PPV_ARGS(&dxgiFactory)))) {
@@ -115,9 +111,15 @@ int main() {
 		}
 	}
 
-	// 
+	// Create Command List and Allocator
+	ID3D12CommandAllocator* cmdAllocator = nullptr;
+	ID3D12GraphicsCommandList* cmdList = nullptr;
 	result = dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdAllocator));
 	result = dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAllocator, nullptr, IID_PPV_ARGS(&cmdList));
+
+	// Create COmmand Queue
+	ID3D12CommandQueue* cmdQueue = nullptr;
+
 	D3D12_COMMAND_QUEUE_DESC cmdQueueDesc = {};
 	cmdQueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;		// タイムアウトなし
 	cmdQueueDesc.NodeMask = 0;
@@ -125,6 +127,8 @@ int main() {
 	cmdQueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 	result = dev->CreateCommandQueue(&cmdQueueDesc, IID_PPV_ARGS(&cmdQueue));
 
+	// Create Swap Chain
+	IDXGISwapChain4* swapchain = nullptr;
 	DXGI_SWAP_CHAIN_DESC1 swapchainDesc = CreateSwapchainDesc();
 	result = dxgiFactory->CreateSwapChainForHwnd(
 		cmdQueue,
@@ -135,6 +139,7 @@ int main() {
 		(IDXGISwapChain1**)&swapchain
 	);
 
+	// Create Descriptor Heap
 	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
 	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 	heapDesc.NodeMask = 0;
@@ -142,6 +147,7 @@ int main() {
 	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	ID3D12DescriptorHeap* rtvHeaps = nullptr;
 	result = dev->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&rtvHeaps));
+
 	DXGI_SWAP_CHAIN_DESC swcDesc = {};
 	result = swapchain->GetDesc(&swcDesc);
 	std::vector<ID3D12Resource*> backBuffers(swcDesc.BufferCount);
@@ -166,6 +172,50 @@ int main() {
 		}
 		// stop while loop when closed
 		if (msg.message == WM_QUIT) { break; }
+
+		// use swapchain
+		auto bbIdx = swapchain->GetCurrentBackBufferIndex();
+
+		D3D12_RESOURCE_BARRIER BarrierDesc = {};
+		BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+		BarrierDesc.Transition.pResource = backBuffers[bbIdx];
+		BarrierDesc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+		BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+		cmdList->ResourceBarrier(1, &BarrierDesc);
+
+		auto rtvH = rtvHeaps->GetCPUDescriptorHandleForHeapStart();
+		rtvH.ptr += static_cast<ULONG_PTR>(bbIdx * dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV));
+		cmdList->OMSetRenderTargets(1, &rtvH, false, nullptr);
+
+		float clearColor[] = { 0.0f, 0.0f, 1.0f, 1.0f };
+		cmdList->ClearRenderTargetView(rtvH, clearColor, 0, nullptr);
+
+		BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+		cmdList->ResourceBarrier(1, &BarrierDesc);
+
+		cmdList->Close();
+
+		// Run commands
+		ID3D12CommandList* cmdlists[] = { cmdList };
+		cmdQueue->ExecuteCommandLists(1, cmdlists);
+
+		cmdQueue->Signal(fence, ++fenceVal);
+
+		if (fence->GetCompletedValue() != fenceVal) {
+			auto event = CreateEvent(nullptr, false, false, nullptr);
+			fence->SetEventOnCompletion(fenceVal, event);
+			WaitForSingleObject(event, INFINITE);
+			CloseHandle(event);
+		}
+		cmdAllocator->Reset();
+		cmdList->Reset(cmdAllocator, nullptr);
+
+		swapchain->Present(1, 0);
 	}
+	UnregisterClass(window.lpszClassName, window.hInstance);
+	return 0;
 }
 
