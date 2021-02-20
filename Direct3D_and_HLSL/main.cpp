@@ -4,13 +4,17 @@
 #include <dxgi1_6.h>
 #include <vector>
 #include <iostream>
+#include <DirectXMath.h>
+#include <d3dcompiler.h>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "d3dcompiler.lib")
 
 const unsigned int windowWidth = 1920;
 const unsigned int windowHeight = 1080;
 
+using namespace DirectX;
 
 HRESULT CreateDXGIFactory(IDXGIFactory6** dxgiFactory) {
 #ifdef _DEBUG
@@ -78,6 +82,66 @@ void SetCommandQueueDesc(D3D12_COMMAND_QUEUE_DESC* desc) {
 	desc->Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 }
 
+void SetHeapProperties(D3D12_HEAP_PROPERTIES* heapProp) {
+	heapProp->Type = D3D12_HEAP_TYPE_UPLOAD;
+	heapProp->CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProp->MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+}
+
+void SetVertResDesc(D3D12_RESOURCE_DESC* resDesc, XMFLOAT3* vertices) {
+	resDesc->Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	resDesc->Width = sizeof(vertices);
+	resDesc->Height = 1;
+	resDesc->DepthOrArraySize = 1;
+	resDesc->MipLevels = 1;
+	resDesc->Format = DXGI_FORMAT_UNKNOWN;
+	resDesc->SampleDesc.Count = 1;
+	resDesc->Flags = D3D12_RESOURCE_FLAG_NONE;
+	resDesc->Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+}
+
+void SetGraphicPipelineStateDesc(
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC* gpipeline,
+	ID3DBlob* vsBlob,
+	ID3DBlob* psBlob,
+	D3D12_RENDER_TARGET_BLEND_DESC* renderTargetBlendDesc,
+	D3D12_INPUT_ELEMENT_DESC* inputLayout,
+	size_t inputLayoutSize,
+	ID3D12RootSignature* rootsignature
+) {
+	gpipeline->pRootSignature = nullptr;
+	gpipeline->VS.pShaderBytecode = vsBlob->GetBufferPointer();
+	gpipeline->VS.BytecodeLength = vsBlob->GetBufferSize();
+	gpipeline->PS.pShaderBytecode = psBlob->GetBufferPointer();
+	gpipeline->PS.BytecodeLength = psBlob->GetBufferSize();
+	gpipeline->SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
+	gpipeline->BlendState.AlphaToCoverageEnable = false;
+	gpipeline->BlendState.IndependentBlendEnable = false;
+	gpipeline->BlendState.RenderTarget[0] = *renderTargetBlendDesc;
+	gpipeline->RasterizerState.MultisampleEnable = false;
+	gpipeline->RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	gpipeline->RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+	gpipeline->RasterizerState.DepthClipEnable = true;
+	gpipeline->RasterizerState.FrontCounterClockwise = false;
+	gpipeline->RasterizerState.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+	gpipeline->RasterizerState.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+	gpipeline->RasterizerState.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+	gpipeline->RasterizerState.AntialiasedLineEnable = false;
+	gpipeline->RasterizerState.ForcedSampleCount = 0;
+	gpipeline->RasterizerState.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+	gpipeline->DepthStencilState.DepthEnable = false;
+	gpipeline->DepthStencilState.StencilEnable = false;
+	gpipeline->InputLayout.pInputElementDescs = inputLayout;
+	gpipeline->InputLayout.NumElements = inputLayoutSize;
+	gpipeline->IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+	gpipeline->PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	gpipeline->NumRenderTargets = 1;
+	gpipeline->RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	gpipeline->SampleDesc.Count = 1;
+	gpipeline->SampleDesc.Quality = 0;
+	gpipeline->pRootSignature = rootsignature;
+
+}
 
 LRESULT WindowProcedure(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	if (msg == WM_DESTROY) {
@@ -93,7 +157,6 @@ void EnableDebugLayer() {
 	debugLayer->EnableDebugLayer();
 	debugLayer->Release();
 }
-
 
 int main() {
 
@@ -202,7 +265,165 @@ int main() {
 	// show window for a while
 	ShowWindow(hwnd, SW_SHOW);
 
+	// Vertices
+	XMFLOAT3 vertices[] = {
+		{-0.4f, -0.7f, 0.0f},
+		{-0.4f, 0.7f, 0.0f},
+		{0.4f, -0.7f, 0.0f},
+		{0.4f, 0.7f, 0.0f},
+	};
+
+	// Create Vertex Buffers on GPU
+	D3D12_HEAP_PROPERTIES heapProp = {};
+	D3D12_RESOURCE_DESC vertResDesc = {};
+	ID3D12Resource* vertBuffer = nullptr;
+	SetHeapProperties(&heapProp);
+	SetVertResDesc(&vertResDesc, vertices);
+	result = dev->CreateCommittedResource(
+		&heapProp,
+		D3D12_HEAP_FLAG_NONE,
+		&vertResDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&vertBuffer)
+	);
+
+	// Copy vertices data from CPU to GPU (vertBuffer)
+	// ID3D12ResourceMap() can map GPU memory area to CPU memory area
+	// so copying data to this CPU memory area can affect that of GPU
+	XMFLOAT3* vertMap = nullptr;
+	D3D12_VERTEX_BUFFER_VIEW vbView = {};
+	result = vertBuffer->Map(0, nullptr, (void**)&vertMap);
+	std::copy(std::begin(vertices), std::end(vertices), vertMap);
+	vertBuffer->Unmap(0, nullptr);
+
+	// Create Vertex Buffer View for the data on GPU memory
+	vbView.BufferLocation = vertBuffer->GetGPUVirtualAddress();
+	vbView.SizeInBytes = sizeof(vertices);
+	vbView.StrideInBytes = sizeof(vertices[0]);
+
+	// Indices
+	unsigned short indices[] = {
+		0, 1, 2,
+		2, 1, 3,
+	};
+
+	ID3D12Resource* idxBuffer = nullptr;
+	vertResDesc.Width = sizeof(indices);
+	result = dev->CreateCommittedResource(
+		&heapProp,
+		D3D12_HEAP_FLAG_NONE,
+		&vertResDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&idxBuffer)
+	);
+
+	unsigned short* mappedIdx = nullptr;
+	idxBuffer->Map(0, nullptr, (void**)&mappedIdx);
+	std::copy(std::begin(indices), std::end(indices), mappedIdx);
+	idxBuffer->Unmap(0, nullptr);
+
+	D3D12_INDEX_BUFFER_VIEW ibView = {};
+	ibView.BufferLocation = idxBuffer->GetGPUVirtualAddress();
+	ibView.Format = DXGI_FORMAT_R16_UINT;
+	ibView.SizeInBytes = sizeof(indices);
+
+	// HLSL related
+	ID3DBlob* vsBlob = nullptr;
+	ID3DBlob* psBlob = nullptr;
+	ID3DBlob* errorBlob = nullptr;
+
+	// Compile Vertex Shader
+	result = D3DCompileFromFile(L"VertexShader.hlsl",
+		nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+		"BasicVS", "vs_5_0",
+		D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION,
+		0, &vsBlob, &errorBlob);
+	if (FAILED(result)) {
+		if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+			::OutputDebugStringA("File Not Found.");
+		}
+		else {
+			std::string errstr;
+			errstr.resize(errorBlob->GetBufferSize());
+			std::copy_n((char*)errorBlob->GetBufferPointer(), errorBlob->GetBufferSize(), errstr.begin());
+			errstr += "\n";
+			OutputDebugStringA(errstr.c_str());
+		}
+		exit(1);
+	}
+
+	// Compile Pixel Shader
+	result = D3DCompileFromFile(L"PixelShader.hlsl",
+		nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+		"BasicPS", "ps_5_0",
+		D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION,
+		0, &psBlob, &errorBlob);
+	if (FAILED(result)) {
+		if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+			::OutputDebugStringA("File Not Found.");
+		}
+		else {
+			std::string errstr;
+			errstr.resize(errorBlob->GetBufferSize());
+			std::copy_n((char*)errorBlob->GetBufferPointer(), errorBlob->GetBufferSize(), errstr.begin());
+			errstr += "\n";
+			OutputDebugStringA(errstr.c_str());
+		}
+		exit(1);
+	}
+
+	// Create Input Element Descriptor
+	D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
+		{ "POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,D3D12_APPEND_ALIGNED_ELEMENT,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0 },
+	};
+
+	// Create Render Target Blend Descriptor
+	D3D12_RENDER_TARGET_BLEND_DESC renderTargetBlendDesc = {};
+	renderTargetBlendDesc.BlendEnable = false;
+	renderTargetBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	renderTargetBlendDesc.LogicOpEnable = false;
+
+	// Create Root Signature
+	ID3D12RootSignature* rootsignature = nullptr;
+	D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+	ID3DBlob* rootSigBlob = nullptr;
+	rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+	result = D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &rootSigBlob, &errorBlob);
+	result = dev->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&rootsignature));
+	rootSigBlob->Release();
+
+	// Create Graphics Pipeline State
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC gpipeline = {};
+	ID3D12PipelineState* _pipelinestate = nullptr;
+	SetGraphicPipelineStateDesc(
+		&gpipeline,
+		vsBlob,
+		psBlob,
+		&renderTargetBlendDesc,
+		inputLayout,
+		_countof(inputLayout),
+		rootsignature
+	);
+	result = dev->CreateGraphicsPipelineState(&gpipeline, IID_PPV_ARGS(&_pipelinestate));
+
+	// Create Viewport and Scissor Rectangle
+	D3D12_VIEWPORT viewport = {};
+	D3D12_RECT scissorrect = {};
+	viewport.Width = windowWidth;
+	viewport.Height = windowHeight;
+	viewport.TopLeftX = 0;
+	viewport.TopLeftY = 0;
+	viewport.MaxDepth = 1.0f;
+	viewport.MinDepth = 0.0f;
+	scissorrect.top = 0;
+	scissorrect.left = 0;
+	scissorrect.right = scissorrect.left + windowWidth;
+	scissorrect.bottom = scissorrect.top + windowHeight;
+
 	MSG msg = {};
+	unsigned int frame = 0;
 	while (true) {
 		if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
 			TranslateMessage(&msg);
@@ -226,15 +447,34 @@ int main() {
 		resourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
 		cmdList->ResourceBarrier(1, &resourceBarrier);
 
+		// Set Pipeline State
+		cmdList->SetPipelineState(_pipelinestate);
+
 		// Get Render Target View of the next frame
 		// and set it as the one for drawing
 		auto rtvHandle = descHeap->GetCPUDescriptorHandleForHeapStart();
 		rtvHandle.ptr += static_cast<ULONG_PTR>(bbIdx * dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV));
 		cmdList->OMSetRenderTargets(1, &rtvHandle, false, nullptr);
 
-		// Add Cmmand to Clear Render Target View to Command List
-		float clearColor[] = { 0.0f, 0.0f, 1.0f, 1.0f };
+		// Clear Render Target View
+		float r, g, b;
+		r = (float)(0xff & frame >> 16) / 255.0f;
+		g = (float)(0xff & frame >> 8) / 255.0f;
+		b = (float)(0xff & frame >> 0) / 255.0f;
+		float clearColor[] = { r, g, b, 1.0f };
 		cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+		++frame;
+
+		// Set Viewports, Scissor Rectangles, Root Signature
+		cmdList->RSSetViewports(1, &viewport);
+		cmdList->RSSetScissorRects(1, &scissorrect);
+		cmdList->SetGraphicsRootSignature(rootsignature);
+
+		// Draw Polygons
+		cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		cmdList->IASetVertexBuffers(0, 1, &vbView);
+		cmdList->IASetIndexBuffer(&ibView);
+		cmdList->DrawIndexedInstanced(6, 1, 0, 0, 0);
 
 		// Switch from Render Target State to Present State
 		resourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
