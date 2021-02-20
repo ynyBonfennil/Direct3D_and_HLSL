@@ -12,7 +12,22 @@ const unsigned int windowWidth = 1920;
 const unsigned int windowHeight = 1080;
 
 
-IDXGIAdapter* GetNVIDIADXGIAdapter(IDXGIFactory6* dxgiFactory) {
+HRESULT CreateDXGIFactory(IDXGIFactory6** dxgiFactory) {
+#ifdef _DEBUG
+	if (FAILED(CreateDXGIFactory2(DXGI_CREATE_FACTORY_DEBUG, IID_PPV_ARGS(dxgiFactory)))) {
+		if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(dxgiFactory)))) {
+			return E_FAIL;
+		}
+	}
+#else
+	if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(dxgiFactory)))) {
+		return E_FAIL;
+	}
+#endif
+	return S_OK;
+}
+
+HRESULT GetNVIDIADXGIAdapter(IDXGIFactory6* dxgiFactory, IDXGIAdapter** adapter) {
 	// List up all the adapters
 	std::vector <IDXGIAdapter*> adapters;
 	IDXGIAdapter* tmpAdapter = nullptr;
@@ -27,9 +42,11 @@ IDXGIAdapter* GetNVIDIADXGIAdapter(IDXGIFactory6* dxgiFactory) {
 
 		std::wstring description = adapterDesc.Description;
 		if (description.find(L"NVIDIA") != std::string::npos) {
-			return adpt;
+			adpt = adpt;
+			return S_OK;
 		}
 	}
+	return E_FAIL;
 }
 
 void SetSwapchainDesc(DXGI_SWAP_CHAIN_DESC1* desc) {
@@ -70,6 +87,13 @@ LRESULT WindowProcedure(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	return DefWindowProc(hwnd, msg, wparam, lparam);
 }
 
+void EnableDebugLayer() {
+	ID3D12Debug* debugLayer = nullptr;
+	auto result = D3D12GetDebugInterface(IID_PPV_ARGS(&debugLayer));
+	debugLayer->EnableDebugLayer();
+	debugLayer->Release();
+}
+
 
 int main() {
 
@@ -97,17 +121,19 @@ int main() {
 		nullptr
 	);
 
+#ifdef _DEBUG
+	EnableDebugLayer();
+#endif
+	HRESULT result = S_OK;
 
-	// DXGI Factory
+	// Create DXGI Factory and get adapter
+	//IDXGIFactory6* dxgiFactory = CreateDXGIFactory();
+	//if (dxgiFactory == nullptr) { return -1; }
 	IDXGIFactory6* dxgiFactory = nullptr;
 	IDXGIAdapter* adpt = nullptr;
-	if (FAILED(CreateDXGIFactory2(DXGI_CREATE_FACTORY_DEBUG, IID_PPV_ARGS(&dxgiFactory)))) {
-		if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&dxgiFactory)))) {
-			return -1;
-		}
-	}
-	adpt = GetNVIDIADXGIAdapter(dxgiFactory);
-	
+	result = CreateDXGIFactory(&dxgiFactory);
+	result = GetNVIDIADXGIAdapter(dxgiFactory, &adpt);
+
 	// Create D3D12Device
 	ID3D12Device* dev = nullptr;
 	D3D_FEATURE_LEVEL featureLevel;
@@ -129,7 +155,6 @@ int main() {
 	// is sort of an interface of Command Allocator.
 	ID3D12CommandAllocator* cmdAllocator = nullptr;
 	ID3D12GraphicsCommandList* cmdList = nullptr;
-	HRESULT result = S_OK;
 	result = dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdAllocator));
 	result = dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAllocator, nullptr, IID_PPV_ARGS(&cmdList));
 
@@ -169,6 +194,7 @@ int main() {
 		descHandle.ptr += dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 	}
 
+	// Create Fence
 	ID3D12Fence* fence = nullptr;
 	UINT64 fenceVal = 0;
 	result = dev->CreateFence(fenceVal, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
@@ -188,14 +214,17 @@ int main() {
 		// use swapchain
 		auto bbIdx = swapchain->GetCurrentBackBufferIndex();
 
-		D3D12_RESOURCE_BARRIER BarrierDesc = {};
-		BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-		BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-		BarrierDesc.Transition.pResource = renderTargets[bbIdx];
-		BarrierDesc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-		BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-		cmdList->ResourceBarrier(1, &BarrierDesc);
+		// Create Resource Barrier
+		D3D12_RESOURCE_BARRIER resourceBarrier = {};
+		resourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		resourceBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+		resourceBarrier.Transition.pResource = renderTargets[bbIdx];
+		resourceBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+		// Switch from Present State to Render Target State
+		resourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+		resourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+		cmdList->ResourceBarrier(1, &resourceBarrier);
 
 		// Get Render Target View of the next frame
 		// and set it as the one for drawing
@@ -207,9 +236,10 @@ int main() {
 		float clearColor[] = { 0.0f, 0.0f, 1.0f, 1.0f };
 		cmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
 
-		BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-		cmdList->ResourceBarrier(1, &BarrierDesc);
+		// Switch from Render Target State to Present State
+		resourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+		resourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+		cmdList->ResourceBarrier(1, &resourceBarrier);
 
 		// Finish Adding Commands
 		cmdList->Close();
@@ -220,12 +250,14 @@ int main() {
 
 		cmdQueue->Signal(fence, ++fenceVal);
 
+		// wait until command execution is done
 		if (fence->GetCompletedValue() != fenceVal) {
 			auto event = CreateEvent(nullptr, false, false, nullptr);
 			fence->SetEventOnCompletion(fenceVal, event);
 			WaitForSingleObject(event, INFINITE);
 			CloseHandle(event);
 		}
+
 		cmdAllocator->Reset();
 		cmdList->Reset(cmdAllocator, nullptr);
 
